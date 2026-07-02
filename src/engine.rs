@@ -1,38 +1,53 @@
-use core::str;
-use std::{error::Error, fmt};
-use serde::Serialize;
+use std::{collections::HashMap, fmt, sync::Arc};
 use log::debug;
 
 pub struct Engine {
+    kv: HashMap<Arc<[u8]>, Arc<[u8]>>
+}
 
+pub enum EngineOutput {
+    /// Returned by SET operations on success
+    StatusOk,
+    /// Returned by GET when data exists (holds a zero-copy pointer)
+    Payload(Arc<[u8]>),
+    /// Returned by GET when a key is missing
+    NotFound,
 }
 
 impl Engine {
     pub fn new() -> Self {
-        Self {  }
+        Self { kv: HashMap::new() }
     }
 
-    pub fn process(&self, command: String) -> Result<Response, EngineRequestError> {
+    // We pass a reference to the Arc buffer for transient parsing
+    pub fn process(&mut self, command: &Arc<[u8]>) -> Result<EngineOutput, EngineRequestError> {
         let req = Request::parse(command);
         match req {
             Request::Set(SetRequest { key, value, ttl }) => self.set(key, value, ttl),
             Request::Get(GetRequest { key }) => self.get(key),
-            Request::Invalid(InvalidRequest { reason }) => Err(EngineRequestError{details: reason}),
+            Request::Invalid(InvalidRequest { reason }) => Err(EngineRequestError { details: reason }),
         }
     }
 
-    pub fn set(&self, key: String, value: String, ttl: Option<u64>) -> Result<Response, EngineRequestError> {
-        debug!("Processing SET request: {}{}{}", key, value, ttl.unwrap());
-        Ok(Response::Set(SetResponse {}))
+    // Convert the zero-copy string slices into long-lived Arc allocations when inserting
+    pub fn set(&mut self, key: &str, value: &str, _ttl: Option<u64>) -> Result<EngineOutput, EngineRequestError> {
+        debug!("Processing SET request: key={}, value={}", key, value);
+        
+        let k_arc: Arc<[u8]> = Arc::from(key.as_bytes());
+        let v_arc: Arc<[u8]> = Arc::from(value.as_bytes());
+        
+        self.kv.insert(k_arc, v_arc);
+        return Ok(EngineOutput::StatusOk);
     }
 
-    pub fn get(&self, key: String) -> Result<Response, EngineRequestError> {
+    pub fn get(&self, key: &str) -> Result<EngineOutput, EngineRequestError> {
         debug!("Processing GET request: {}", key);
-        Ok(Response::Get(GetResponse {
-            key: key,
-            value: String::from("value"),
-            ttl: 0
-        }))
+        
+        // Query the map containing Arc<[u8]> using a byte slice view
+        match self.kv.get(key.as_bytes()) {
+            Some(value) => Ok(EngineOutput::Payload(Arc::clone(value))),
+            None => Ok(EngineOutput::NotFound),
+        }
     }
 }
 
@@ -47,94 +62,64 @@ impl fmt::Display for EngineRequestError {
     }
 }
 
-// 2. Implement the Error trait
 impl std::error::Error for EngineRequestError {}
 
-pub enum Request {
-    Set(SetRequest),
-    Get(GetRequest),
+pub enum Request<'a> {
+    Set(SetRequest<'a>),
+    Get(GetRequest<'a>),
     Invalid(InvalidRequest)
 }
 
-impl Request {
-    pub fn parse(req: String) -> Request {
-        let commands: Vec<&str> = req.split_whitespace().collect();
-        if commands.is_empty() {
+impl<'a> Request<'a> {
+    // Borrow req with lifetime 'a to tie it to the returned Request tokens
+    pub fn parse(req: &'a [u8]) -> Request<'a> {
+        let raw_str = match std::str::from_utf8(req) {
+            Ok(s) => s,
+            Err(_) => return Request::Invalid(InvalidRequest { reason: "Invalid UTF-8".into() })
+        };
+        
+        if raw_str.trim().is_empty() {
             return Request::Invalid(InvalidRequest {
                 reason: String::from("Empty request"),
             });
         }
 
-        match commands[0] {
-            "GET" => {
-                if commands.len() != 2 {
-                    Request::Invalid(InvalidRequest {
-                        reason: String::from("GET request: Invalid arguments count."),
-                    })
+        let mut commands = raw_str.split_whitespace();
+        let cmd = commands.next();
+
+        match cmd {
+            Some("GET") => {
+                if let Some(key) = commands.next() {
+                    Request::Get(GetRequest { key })
                 } else {
-                    Request::Get(GetRequest { key: commands[1].to_string() })
-                }  
-            },
-            "SET" => {
-                if commands.len() != 4 {
-                    Request::Invalid(InvalidRequest {
-                        reason: String::from("SET request: Invalid arguments count."),
-                    })
-                } else {
-                    Request::Set(SetRequest {
-                        key: commands[1].to_string(),
-                        value: commands[2].to_string(),
-                        ttl: commands.get(3).and_then(|t| t.parse::<u64>().ok()),
-                    })
+                    Request::Invalid(InvalidRequest { reason: "Missing key for GET".into() })
                 }
-            },
-            _ => Request::Invalid(InvalidRequest {
-                reason: String::from("Unsupported command")
-            })
+            }
+            Some("SET") => {
+                if let (Some(key), Some(val), Some(ttl_str)) = (commands.next(), commands.next(), commands.next()) {
+                    match ttl_str.parse::<u64>() {
+                        Ok(num) => Request::Set(SetRequest { key, value: val, ttl: Some(num) }),
+                        Err(_) => Request::Invalid(InvalidRequest { reason: String::from("Invalid TTL") }),
+                    }
+                } else {
+                    Request::Invalid(InvalidRequest { reason: "Missing arguments for SET".into() })
+                }
+            }
+            _ => Request::Invalid(InvalidRequest { reason: String::from("Invalid command") })
         }
     }
 }
 
-pub struct SetRequest {
-    key: String,
-    value: String,
-    ttl: Option<u64>
+pub struct SetRequest<'a> {
+    pub key: &'a str,
+    pub value: &'a str,
+    pub ttl: Option<u64>
 }
 
-pub struct GetRequest {
-    key: String
+pub struct GetRequest<'a> {
+    pub key: &'a str,
 }
 
 pub struct InvalidRequest {
-    reason: String
-}
-
-pub enum Response {
-    Get(GetResponse),
-    Set(SetResponse)
-}
-
-impl Response {
-    pub fn to_string_json(&self) -> Result<String, Box<dyn Error>> {
-        match self {
-            Self::Get(req) => {
-                let js = serde_json::to_string(req)?;
-                Ok(js)
-            }
-            Self::Set(req) => {
-                let js = serde_json::to_string(req)?;
-                Ok(js)
-            }
-        }
-    }
-}
-
-#[derive(Serialize, Debug)]
-pub struct SetResponse {}
-
-#[derive(Serialize, Debug)]
-pub struct GetResponse {
-    key: String,
-    value: String,
-    ttl: u64
+    pub reason: String
 }
