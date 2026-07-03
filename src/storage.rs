@@ -1,5 +1,5 @@
-use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
-use log::{debug, info};
+use std::{collections::HashMap, hash::{DefaultHasher, Hasher}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use log::debug;
 use tokio::sync::RwLock;
 
 pub struct StorageEntry {
@@ -8,13 +8,10 @@ pub struct StorageEntry {
 }
 
 pub struct Storage {
-    // We make the underlying HashMap public or wrapped cleanly 
-    // so you can use `.write().await` outside the struct.
     pub kv: HashMap<Arc<[u8]>, StorageEntry>,
 }
 
 impl Storage {
-    // 1. Storage::new now returns the shared, locked instance directly
     pub fn new() -> Self {
         Self { kv: HashMap::new() }
     }
@@ -22,7 +19,7 @@ impl Storage {
     pub fn start_eviction_loop(storage: Arc<RwLock<Self>>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
-            info!("[Eviction] Background thread initialized and running!");
+            debug!("[Eviction] Background thread initialized and running!");
 
             loop {
                 interval.tick().await;
@@ -34,7 +31,7 @@ impl Storage {
                     for key in sample_keys {
                         if let Some(entry) = lock.kv.get(&key) {
                             if entry.ttl < now {
-                                info!("[Eviction] removing key {} now", std::str::from_utf8(&key).unwrap());
+                                debug!("[Eviction] removing key {} now", std::str::from_utf8(&key).unwrap());
                                 lock.kv.remove(&key);
                             }
                         }
@@ -44,20 +41,62 @@ impl Storage {
         });
     }
 
-    // Standard synchronous-style methods inside (called AFTER you get the lock)
     pub fn set(&mut self, key: Arc<[u8]>, value: Arc<[u8]>, ttl: u128) -> Option<StorageEntry> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         let ttl = now + ttl;
         self.kv.insert(key, StorageEntry { value, ttl })
     }
 
-    pub fn get(&self, key: Arc<[u8]>) -> Option<&StorageEntry> {
-        match self.kv.get(&key) {
+    pub fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+        match self.kv.get(key) {
             Some(entry) => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                if entry.ttl < now { None } else { Some(entry) }
+                if entry.ttl < now { 
+                    None 
+                } else { 
+                    Some(Arc::clone(&entry.value)) 
+                }
             }
             None => None,
         }
+    }
+}
+
+pub struct ShardStorage {
+    maps: Vec<Arc<RwLock<Storage>>>
+}
+
+impl ShardStorage {
+    pub fn new(cap: usize) -> Self {
+        let mut maps = Vec::with_capacity(cap);
+        for _ in 0..cap {
+            let storage = Arc::new(RwLock::new(Storage::new()));
+            maps.push(Arc::clone(&storage));
+            Storage::start_eviction_loop(storage);
+        }
+        Self { maps }
+    }
+
+    pub async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>, ttl: u128) {
+        let idx = self.hash(&key);
+        let st = &self.maps[idx];
+        debug!("[write] key {} into hash {}", std::str::from_utf8(&key).unwrap(), idx);
+        let mut cache = st.write().await;
+        cache.set(key, value, ttl);
+    }
+
+    pub async fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+        let idx = self.hash(key);
+        let st = &self.maps[idx];
+        debug!("[read] key {} from hash {}", std::str::from_utf8(&key).unwrap(), idx);
+        let cache = st.read().await;
+        cache.get(key)
+    }
+
+    pub fn hash(&self, key: &[u8]) -> usize {
+        let mut hasher_raw = DefaultHasher::new();
+        hasher_raw.write(key);
+        let num_raw = hasher_raw.finish();
+        (num_raw as usize) % self.maps.len()
     }
 }

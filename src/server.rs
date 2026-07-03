@@ -21,8 +21,6 @@ impl Server {
         let listener = TcpListener::bind(&self.uri).await.unwrap();
         println!("Starting an async listener at {}", self.uri);
 
-        self.engine.initialize_background_tasks();
-
         loop {
             let (stream, _) = listener.accept().await.unwrap();
             let client_engine = Arc::clone(&self.engine);

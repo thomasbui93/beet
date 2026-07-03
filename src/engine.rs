@@ -1,12 +1,10 @@
 use std::{fmt, sync::Arc};
 use log::debug;
-// 1. FIXED: Use Tokio's async RwLock instead of std::sync::RwLock
-use tokio::sync::RwLock; 
 
-use crate::storage::Storage;
+use crate::storage::ShardStorage;
 
 pub struct Engine {
-    storage: Arc<RwLock<Storage>>
+    storage: ShardStorage
 }
 
 pub enum EngineOutput {
@@ -17,11 +15,7 @@ pub enum EngineOutput {
 
 impl Engine {
     pub fn new() -> Self {
-        Self { storage: Arc::new(RwLock::new(Storage::new())) }
-    }
-
-    pub fn initialize_background_tasks(&self) {
-        Storage::start_eviction_loop(Arc::clone(&self.storage));
+        Self { storage: ShardStorage::new(100)}
     }
 
     pub async fn process(&self, command: &Arc<[u8]>) -> Result<EngineOutput, EngineRequestError> {
@@ -39,22 +33,17 @@ impl Engine {
         
         let k_arc: Arc<[u8]> = Arc::from(key.as_bytes());
         let v_arc: Arc<[u8]> = Arc::from(value.as_bytes());
-        
-        // This will now compile smoothly using Tokio's async lock!
-        let mut cache = self.storage.write().await;
 
-        cache.set(k_arc, v_arc, ttl);
+        self.storage.set(k_arc, v_arc, ttl).await;
         return Ok(EngineOutput::StatusOk);
     }
 
     pub async fn get(&self, key: &str) -> Result<EngineOutput, EngineRequestError> {
         debug!("Processing GET request: {}", key);
-        
-        let cache = self.storage.read().await;
-        
-        // Query the map containing Arc<[u8]> 
-        match cache.get(Arc::from(key.as_bytes())) {
-            Some(entry) => Ok(EngineOutput::Payload(Arc::clone(&entry.value))),
+        let k_arc: Arc<[u8]> = Arc::from(key.as_bytes());
+
+        match self.storage.get(&k_arc).await {
+            Some(val) => Ok(EngineOutput::Payload(val)),
             None => Ok(EngineOutput::NotFound),
         }
     }
