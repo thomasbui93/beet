@@ -10,6 +10,10 @@ pub struct ServerConfig<'a> {
     pub host: &'a String,
 }
 
+pub struct StorageConfig {
+    pub shard_count: usize
+}
+
 
 impl Config {
     pub fn new(config_path: String) -> Result<Self, Box<dyn Error>> {
@@ -35,6 +39,13 @@ impl Config {
         let port = self.get(&String::from("PORT"))?; 
         let host = self.get(&String::from("HOST"))?;
         Some(ServerConfig { port, host })
+    }
+
+    pub fn get_storage_cfg(&self) -> Option<StorageConfig> {
+        match self.get(&String::from("SHARD_COUNT"))?.parse::<usize>() {
+            Ok(val) => Some(StorageConfig { shard_count: val }),
+            Err(_) => None
+        }
     }
 }
 

@@ -1,74 +1,75 @@
-use std::{io::{Read, Write}, net::{TcpListener, TcpStream}, sync::Arc};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::StorageConfig;
 use crate::engine::{Engine, EngineOutput};
 
 pub struct Server {
     uri: String,
-    engine: Engine,
-    read_buffer: Vec<u8>,
+    engine: Arc<Engine>
 }
 
 impl Server {
-    pub fn new(uri: String) -> Self {
+    pub fn new(uri: String, storage_cfg: StorageConfig) -> Self {
         Self { 
             uri,
-            engine: Engine::new(),
-            read_buffer: Vec::with_capacity(4096)
+            engine: Arc::new(Engine::new(storage_cfg))
         }
     }
 
-    pub fn start(&mut self) {
-        let listener = TcpListener::bind(self.uri.clone()).unwrap();
-        println!("Starting a listener at {}", self.uri);
+    pub async fn start(&mut self) {
+        let listener = TcpListener::bind(&self.uri).await.unwrap();
+        println!("Starting an async listener at {}", self.uri);
 
-        for stream in listener.incoming() {
-            self.handle(stream.unwrap());
-        } 
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let client_engine = Arc::clone(&self.engine);
+
+            tokio::spawn(async move {
+                Self::handle(client_engine, stream).await;
+            });
+        }
     }
 
-    pub fn handle(&mut self, mut stream: TcpStream) {
+    pub async fn handle(engine: Arc<Engine>, mut stream: TcpStream) {
+        let mut read_buffer = Vec::with_capacity(4096);
         let mut temp_chunk = [0u8; 1024];
 
         loop {
-            // 1. Read network data into our temporary chunk
-            let bytes_read = match stream.read(&mut temp_chunk) {
-                Ok(0) => break, // Connection closed by client
+            let bytes_read = match stream.read(&mut temp_chunk).await {
+                Ok(0) => break,
                 Ok(n) => n,
                 Err(_) => break,
             };
 
-            self.read_buffer.extend_from_slice(&temp_chunk[..bytes_read]);
+            read_buffer.extend_from_slice(&temp_chunk[..bytes_read]);
+            while let Some(delimiter_idx) = read_buffer.iter().position(|&b| b == b'\n') {
+                let mut message_bytes = read_buffer.drain(..=delimiter_idx).collect::<Vec<u8>>();
 
-            // 3. Scan the persistent buffer for our delimiter (e.g., newline `\n`)
-            while let Some(delimiter_idx) = self.read_buffer.iter().position(|&b| b == b'\n') {
-                
-                // We found a complete message frame! Extract it up to the delimiter index
-                let mut message_bytes = self.read_buffer.drain(..=delimiter_idx).collect::<Vec<u8>>();
-                
-                // Strip the trailing delimiter (\n or \r\n)
                 if message_bytes.ends_with(b"\n") { message_bytes.pop(); }
                 if message_bytes.ends_with(b"\r") { message_bytes.pop(); }
 
                 if !message_bytes.is_empty() {
-                    // 4. Freeze ONLY this complete message into an Arc for the Engine
                     let shared_msg: Arc<[u8]> = Arc::from(message_bytes);
-                    
-                    // Slice the Arc for keys/values safely as we did before
-                    match self.engine.process(&shared_msg) {
+
+                    match engine.process(&shared_msg).await {
                         Ok(EngineOutput::Payload(value_bytes)) => {
-                            stream.write_all(b"VALUE ").unwrap();
-                            stream.write_all(b" ").unwrap();
-                            stream.write_all(&value_bytes).unwrap();
-                            stream.write_all(b"\n").unwrap();
+                            let mut buf = Vec::with_capacity(7 + value_bytes.len());
+                            buf.extend_from_slice(b"VALUE ");
+                            buf.extend_from_slice(&value_bytes);
+                            buf.extend_from_slice(b"\n");
+
+                            let _ = stream.write_all(&buf).await;
                         }
                         Ok(EngineOutput::StatusOk) => {
-                            stream.write_all(b"OK\n").unwrap();
+                            let _ = stream.write_all(b"OK\n").await;
                         }
                         Ok(EngineOutput::NotFound) => {
-                            stream.write_all(b"NOT_FOUND\n").unwrap();
+                            let _ = stream.write_all(b"NOT_FOUND\n").await;
                         }
                         Err(_) => {
-                            stream.write_all(b"ERROR\n").unwrap();
+                            let _ = stream.write_all(b"ERROR\n").await;
                         }
                     }
                 }

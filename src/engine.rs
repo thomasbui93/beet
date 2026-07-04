@@ -1,51 +1,48 @@
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
 use log::debug;
 
+use crate::{config::StorageConfig, storage::ShardStorage};
+
 pub struct Engine {
-    kv: HashMap<Arc<[u8]>, Arc<[u8]>>
+    storage: ShardStorage
 }
 
 pub enum EngineOutput {
-    /// Returned by SET operations on success
     StatusOk,
-    /// Returned by GET when data exists (holds a zero-copy pointer)
     Payload(Arc<[u8]>),
-    /// Returned by GET when a key is missing
     NotFound,
 }
 
 impl Engine {
-    pub fn new() -> Self {
-        Self { kv: HashMap::new() }
+    pub fn new(storage_cfg: StorageConfig) -> Self {
+        Self { storage: ShardStorage::new(storage_cfg)}
     }
 
-    // We pass a reference to the Arc buffer for transient parsing
-    pub fn process(&mut self, command: &Arc<[u8]>) -> Result<EngineOutput, EngineRequestError> {
+    pub async fn process(&self, command: &Arc<[u8]>) -> Result<EngineOutput, EngineRequestError> {
         let req = Request::parse(command);
         match req {
-            Request::Set(SetRequest { key, value, ttl }) => self.set(key, value, ttl),
-            Request::Get(GetRequest { key }) => self.get(key),
+            Request::Set(SetRequest { key, value, ttl }) => self.set(key, value, ttl).await,
+            Request::Get(GetRequest { key }) => self.get(key).await,
             Request::Invalid(InvalidRequest { reason }) => Err(EngineRequestError { details: reason }),
         }
     }
 
-    // Convert the zero-copy string slices into long-lived Arc allocations when inserting
-    pub fn set(&mut self, key: &str, value: &str, _ttl: Option<u64>) -> Result<EngineOutput, EngineRequestError> {
+    pub async fn set(&self, key: &str, value: &str, ttl: u128) -> Result<EngineOutput, EngineRequestError> {
         debug!("Processing SET request: key={}, value={}", key, value);
         
         let k_arc: Arc<[u8]> = Arc::from(key.as_bytes());
         let v_arc: Arc<[u8]> = Arc::from(value.as_bytes());
-        
-        self.kv.insert(k_arc, v_arc);
+
+        self.storage.set(k_arc, v_arc, ttl).await;
         return Ok(EngineOutput::StatusOk);
     }
 
-    pub fn get(&self, key: &str) -> Result<EngineOutput, EngineRequestError> {
+    pub async fn get(&self, key: &str) -> Result<EngineOutput, EngineRequestError> {
         debug!("Processing GET request: {}", key);
-        
-        // Query the map containing Arc<[u8]> using a byte slice view
-        match self.kv.get(key.as_bytes()) {
-            Some(value) => Ok(EngineOutput::Payload(Arc::clone(value))),
+        let k_arc: Arc<[u8]> = Arc::from(key.as_bytes());
+
+        match self.storage.get(&k_arc).await {
+            Some(val) => Ok(EngineOutput::Payload(val)),
             None => Ok(EngineOutput::NotFound),
         }
     }
@@ -71,7 +68,6 @@ pub enum Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    // Borrow req with lifetime 'a to tie it to the returned Request tokens
     pub fn parse(req: &'a [u8]) -> Request<'a> {
         let raw_str = match std::str::from_utf8(req) {
             Ok(s) => s,
@@ -97,8 +93,8 @@ impl<'a> Request<'a> {
             }
             Some("SET") => {
                 if let (Some(key), Some(val), Some(ttl_str)) = (commands.next(), commands.next(), commands.next()) {
-                    match ttl_str.parse::<u64>() {
-                        Ok(num) => Request::Set(SetRequest { key, value: val, ttl: Some(num) }),
+                    match ttl_str.parse::<u128>() {
+                        Ok(num) => Request::Set(SetRequest { key, value: val, ttl: num }),
                         Err(_) => Request::Invalid(InvalidRequest { reason: String::from("Invalid TTL") }),
                     }
                 } else {
@@ -113,7 +109,7 @@ impl<'a> Request<'a> {
 pub struct SetRequest<'a> {
     pub key: &'a str,
     pub value: &'a str,
-    pub ttl: Option<u64>
+    pub ttl: u128
 }
 
 pub struct GetRequest<'a> {
