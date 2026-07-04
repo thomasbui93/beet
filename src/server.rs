@@ -37,45 +37,39 @@ impl Server {
         let mut temp_chunk = [0u8; 1024];
 
         loop {
-            // 1. Read network data into our temporary chunk
             let bytes_read = match stream.read(&mut temp_chunk).await {
-                Ok(0) => break, // Connection closed by client safely
+                Ok(0) => break,
                 Ok(n) => n,
                 Err(_) => break,
             };
 
             read_buffer.extend_from_slice(&temp_chunk[..bytes_read]);
-
-            // 3. Scan the persistent buffer for our delimiter (e.g., newline `\n`)
             while let Some(delimiter_idx) = read_buffer.iter().position(|&b| b == b'\n') {
-                
-                // We found a complete message frame! Extract it up to the delimiter index
                 let mut message_bytes = read_buffer.drain(..=delimiter_idx).collect::<Vec<u8>>();
-                
-                // Strip the trailing delimiter (\n or \r\n)
+
                 if message_bytes.ends_with(b"\n") { message_bytes.pop(); }
                 if message_bytes.ends_with(b"\r") { message_bytes.pop(); }
 
                 if !message_bytes.is_empty() {
-                    // 4. Freeze ONLY this complete message into an Arc for the Engine
                     let shared_msg: Arc<[u8]> = Arc::from(message_bytes);
-                    
-                    // Slice the Arc for keys/values safely as we did before
+
                     match engine.process(&shared_msg).await {
                         Ok(EngineOutput::Payload(value_bytes)) => {
-                            stream.write_all(b"VALUE ").await;
-                            stream.write_all(b" ").await;
-                            stream.write_all(&value_bytes).await;
-                            stream.write_all(b"\n").await;
+                            let mut buf = Vec::with_capacity(7 + value_bytes.len());
+                            buf.extend_from_slice(b"VALUE ");
+                            buf.extend_from_slice(&value_bytes);
+                            buf.extend_from_slice(b"\n");
+
+                            let _ = stream.write_all(&buf).await;
                         }
                         Ok(EngineOutput::StatusOk) => {
-                            stream.write_all(b"OK\n").await;
+                            let _ = stream.write_all(b"OK\n").await;
                         }
                         Ok(EngineOutput::NotFound) => {
-                            stream.write_all(b"NOT_FOUND\n").await;
+                            let _ = stream.write_all(b"NOT_FOUND\n").await;
                         }
                         Err(_) => {
-                            stream.write_all(b"ERROR\n").await;
+                            let _ = stream.write_all(b"ERROR\n").await;
                         }
                     }
                 }

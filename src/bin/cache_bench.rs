@@ -9,7 +9,7 @@ fn main() {
     // --- CONFIGURATION ---
     let target_server = "127.0.0.1:8080";
     let concurrency = 50;
-    let test_duration = Duration::from_secs(10);
+    let test_duration = Duration::from_secs(60);
     // ---------------------
 
     println!("⚡ Starting Rust TCP Cache bench on {}...", target_server);

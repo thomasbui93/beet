@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 use log::debug;
 
-use crate::{config::StorageConfig, storage::{self, ShardStorage}};
+use crate::{config::StorageConfig, storage::ShardStorage};
 
 pub struct Engine {
     storage: ShardStorage
