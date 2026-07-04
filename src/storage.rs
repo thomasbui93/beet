@@ -2,6 +2,8 @@ use std::{collections::HashMap, hash::{DefaultHasher, Hasher}, sync::Arc, time::
 use log::debug;
 use tokio::sync::RwLock;
 
+use crate::config::StorageConfig;
+
 pub struct StorageEntry {
     pub value: Arc<[u8]>,
     pub ttl: u128,
@@ -67,9 +69,9 @@ pub struct ShardStorage {
 }
 
 impl ShardStorage {
-    pub fn new(cap: usize) -> Self {
-        let mut maps = Vec::with_capacity(cap);
-        for _ in 0..cap {
+    pub fn new(cfg: StorageConfig) -> Self {
+        let mut maps = Vec::with_capacity(cfg.shard_count);
+        for _ in 0..cfg.shard_count {
             let storage = Arc::new(RwLock::new(Storage::new()));
             maps.push(Arc::clone(&storage));
             Storage::start_eviction_loop(storage);

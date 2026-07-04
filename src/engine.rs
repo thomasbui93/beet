@@ -1,7 +1,7 @@
 use std::{fmt, sync::Arc};
 use log::debug;
 
-use crate::storage::ShardStorage;
+use crate::{config::StorageConfig, storage::{self, ShardStorage}};
 
 pub struct Engine {
     storage: ShardStorage
@@ -14,14 +14,13 @@ pub enum EngineOutput {
 }
 
 impl Engine {
-    pub fn new() -> Self {
-        Self { storage: ShardStorage::new(100)}
+    pub fn new(storage_cfg: StorageConfig) -> Self {
+        Self { storage: ShardStorage::new(storage_cfg)}
     }
 
     pub async fn process(&self, command: &Arc<[u8]>) -> Result<EngineOutput, EngineRequestError> {
         let req = Request::parse(command);
         match req {
-            // Added .await to async function execution paths
             Request::Set(SetRequest { key, value, ttl }) => self.set(key, value, ttl).await,
             Request::Get(GetRequest { key }) => self.get(key).await,
             Request::Invalid(InvalidRequest { reason }) => Err(EngineRequestError { details: reason }),

@@ -16,6 +16,11 @@ async fn main() {
         error!("Invalid server config");
         return;
     };
-    let mut  server = server::Server::new(format!("{}:{}", server_cfg.host, server_cfg.port));
+
+    let Some(storage_cfg) = cfg.get_storage_cfg() else {
+        error!("Invalid storage config");
+        return;
+    };
+    let mut server = server::Server::new(format!("{}:{}", server_cfg.host, server_cfg.port), storage_cfg);
     server.start().await;
 }

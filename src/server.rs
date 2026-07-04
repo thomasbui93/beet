@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::config::StorageConfig;
 use crate::engine::{Engine, EngineOutput};
 
 pub struct Server {
@@ -10,10 +11,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(uri: String) -> Self {
+    pub fn new(uri: String, storage_cfg: StorageConfig) -> Self {
         Self { 
             uri,
-            engine: Arc::new(Engine::new())
+            engine: Arc::new(Engine::new(storage_cfg))
         }
     }
 
