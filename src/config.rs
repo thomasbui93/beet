@@ -42,7 +42,7 @@ impl Config {
     }
 
     pub fn get_storage_cfg(&self) -> Option<StorageConfig> {
-        match self.get(&String::from("SHARD_COUNT"))?.parse::<usize>() {
+        match self.get(&String::from("SHARD_COUNT")).unwrap_or(&String::from("10")).parse::<usize>() {
             Ok(val) => Some(StorageConfig { shard_count: val }),
             Err(_) => None
         }

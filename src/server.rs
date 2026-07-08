@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use bytes::BytesMut;
 
 use crate::config::StorageConfig;
 use crate::engine::{Engine, EngineOutput};
@@ -33,34 +34,49 @@ impl Server {
     }
 
     pub async fn handle(engine: Arc<Engine>, mut stream: TcpStream) {
-        let mut read_buffer = Vec::with_capacity(4096);
-        let mut temp_chunk = [0u8; 1024];
+        let mut read_buffer = BytesMut::with_capacity(4096);
 
         loop {
-            let bytes_read = match stream.read(&mut temp_chunk).await {
-                Ok(0) => break,
+            let bytes_read = match stream.read_buf(&mut read_buffer).await {
+                Ok(0) => break, // Connection closed
                 Ok(n) => n,
                 Err(_) => break,
             };
 
-            read_buffer.extend_from_slice(&temp_chunk[..bytes_read]);
             while let Some(delimiter_idx) = read_buffer.iter().position(|&b| b == b'\n') {
-                let mut message_bytes = read_buffer.drain(..=delimiter_idx).collect::<Vec<u8>>();
+                let mut line = read_buffer.split_to(delimiter_idx + 1);
 
-                if message_bytes.ends_with(b"\n") { message_bytes.pop(); }
-                if message_bytes.ends_with(b"\r") { message_bytes.pop(); }
+                // Clean up the trailing delimiters in-place modifying just the length property
+                if line.ends_with(b"\n") { line.truncate(line.len() - 1); }
+                if line.ends_with(b"\r") { line.truncate(line.len() - 1); }
 
-                if !message_bytes.is_empty() {
-                    let shared_msg: Arc<[u8]> = Arc::from(message_bytes);
+                if !line.is_empty() {
+                    // Freeze turns the mutable view into an immutable, thread-safe, 
+                    // atomic reference-counted 'Bytes' instance. 
+                    // Total copy cost = 0 bytes.
+                    let shared_msg = line.freeze(); 
 
+                    // Pass the cheap atomic reference down into the engine
                     match engine.process(&shared_msg).await {
                         Ok(EngineOutput::Payload(value_bytes)) => {
-                            let mut buf = Vec::with_capacity(7 + value_bytes.len());
-                            buf.extend_from_slice(b"VALUE ");
-                            buf.extend_from_slice(&value_bytes);
-                            buf.extend_from_slice(b"\n");
-
-                            let _ = stream.write_all(&buf).await;
+                            if value_bytes.len() <= 2048 {
+                                let mut stack_buf = [0u8; 2048 + 7];
+                                stack_buf[0..6].copy_from_slice(b"VALUE ");
+                                
+                                let val_len = value_bytes.len();
+                                stack_buf[6..6 + val_len].copy_from_slice(&value_bytes);
+                                stack_buf[6 + val_len] = b'\n';
+                                
+                                // Exactly ONE system call, ONE await point, ZERO heap allocation
+                                let _ = stream.write_all(&stack_buf[..7 + val_len]).await;
+                            } else {
+                                // Fallback for massive values (heap allocation is fine for rare anomalies)
+                                let mut allocation = Vec::with_capacity(7 + value_bytes.len());
+                                allocation.extend_from_slice(b"VALUE ");
+                                allocation.extend_from_slice(&value_bytes);
+                                allocation.extend_from_slice(b"\n");
+                                let _ = stream.write_all(&allocation).await;
+                            }
                         }
                         Ok(EngineOutput::StatusOk) => {
                             let _ = stream.write_all(b"OK\n").await;
