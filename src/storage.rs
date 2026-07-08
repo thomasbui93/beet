@@ -1,16 +1,17 @@
 use std::{collections::HashMap, hash::{DefaultHasher, Hasher}, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
+use bytes::Bytes;
 use log::debug;
 use tokio::sync::RwLock;
 
 use crate::config::StorageConfig;
 
 pub struct StorageEntry {
-    pub value: Arc<[u8]>,
+    pub value: Bytes,
     pub ttl: u128,
 }
 
 pub struct Storage {
-    pub kv: HashMap<Arc<[u8]>, StorageEntry>,
+    pub kv: HashMap<Bytes, StorageEntry>,
 }
 
 impl Storage {
@@ -28,35 +29,36 @@ impl Storage {
                 let mut lock = storage.write().await;
                 if !lock.kv.is_empty() {
                     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-                    let sample_keys: Vec<Arc<[u8]>> = lock.kv.keys().cloned().collect();
                     
-                    for key in sample_keys {
-                        if let Some(entry) = lock.kv.get(&key) {
-                            if entry.ttl < now {
-                                debug!("[Eviction] removing key {} now", std::str::from_utf8(&key).unwrap());
-                                lock.kv.remove(&key);
+                    lock.kv.retain(|key, entry| {
+                        if entry.ttl < now {
+                            if let Ok(s) = std::str::from_utf8(key) {
+                                debug!("[Eviction] removing key {} now", s);
                             }
+                            false
+                        } else {
+                            true
                         }
-                    }
+                    });
                 }
             }
         });
     }
 
-    pub fn set(&mut self, key: Arc<[u8]>, value: Arc<[u8]>, ttl: u128) -> Option<StorageEntry> {
+    pub fn set(&mut self, key: Bytes, value: Bytes, ttl: u128) -> Option<StorageEntry> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
         let ttl = now + ttl;
         self.kv.insert(key, StorageEntry { value, ttl })
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+    pub fn get(&self, key: &Bytes) -> Option<Bytes> {
         match self.kv.get(key) {
             Some(entry) => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
                 if entry.ttl < now { 
                     None 
                 } else { 
-                    Some(Arc::clone(&entry.value)) 
+                    Some(entry.value.clone())
                 }
             }
             None => None,
@@ -79,25 +81,25 @@ impl ShardStorage {
         Self { maps }
     }
 
-    pub async fn set(&self, key: Arc<[u8]>, value: Arc<[u8]>, ttl: u128) {
+    pub async fn set(&self, key: Bytes, value: Bytes, ttl: u128) {
         let idx = self.hash(&key);
         let st = &self.maps[idx];
-        debug!("[write] key {} into hash {}", std::str::from_utf8(&key).unwrap(), idx);
         let mut cache = st.write().await;
         cache.set(key, value, ttl);
     }
 
-    pub async fn get(&self, key: &[u8]) -> Option<Arc<[u8]>> {
+    pub async fn get(&self, key: &Bytes) -> Option<Bytes> {
         let idx = self.hash(key);
         let st = &self.maps[idx];
-        debug!("[read] key {} from hash {}", std::str::from_utf8(&key).unwrap(), idx);
         let cache = st.read().await;
         cache.get(key)
     }
 
-    pub fn hash(&self, key: &[u8]) -> usize {
+    // FIXED: Accept shared reference wrapper to avoid atomic mutations
+    pub fn hash(&self, key: &Bytes) -> usize {
         let mut hasher_raw = DefaultHasher::new();
-        hasher_raw.write(key);
+        hasher_raw.write(key.as_ref()); 
+        
         let num_raw = hasher_raw.finish();
         (num_raw as usize) % self.maps.len()
     }
